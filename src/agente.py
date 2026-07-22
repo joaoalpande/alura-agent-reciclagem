@@ -190,7 +190,9 @@ def _obter_ferramentas():
 def _obter_llm_para_modelo(nome_modelo: str):
     if nome_modelo not in _llms_por_modelo:
         ferramentas, _ = _obter_ferramentas()
-        llm = ChatGoogleGenerativeAI(model=nome_modelo, temperature=0.2)
+        # max_retries=1: sem retry interno da biblioteca (5-6 tentativas com espera
+        # crescente, ~60s) — a cadeia de fallback já cuida da resiliência entre modelos.
+        llm = ChatGoogleGenerativeAI(model=nome_modelo, temperature=0.2, max_retries=1)
         _llms_por_modelo[nome_modelo] = llm.bind_tools(ferramentas)
     return _llms_por_modelo[nome_modelo]
 
