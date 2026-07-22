@@ -26,7 +26,16 @@ PASTA_VECTORSTORE = RAIZ / "vectorstore"
 CAMINHO_CSV = RAIZ / "documentos" / "relatorio_reciclagem_mensal.csv"
 
 MODELO_EMBEDDING = "models/gemini-embedding-001"
-MODELO_CHAT = "gemini-flash-latest"
+
+# Cadeia de fallback: cada modelo tem cota gratuita separada. Se o atual esgotar
+# a cota, tenta o próximo, do mais capaz para o mais "de reserva".
+MODELOS_CHAT_FALLBACK = (
+    "gemini-flash-latest",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash",
+    "gemma-4-26b-a4b-it",
+)
 
 METRICAS_PERMITIDAS = ("percentual_reciclado", "quantidade_kg")
 OPERACOES_PERMITIDAS = ("media", "total", "maximo", "minimo")
@@ -148,20 +157,55 @@ def _construir_ferramentas():
     return [buscar_no_manual, consultar_dados_reciclagem]
 
 
-_llm_com_ferramentas = None
+_llms_por_modelo = {}
+_ferramentas_lista = None
 _ferramentas_por_nome = None
 
 LIMITE_CHAMADAS_FERRAMENTA = 5
 
+PISTAS_ERRO_RECUPERAVEL = ("429", "RESOURCE_EXHAUSTED", "quota", "Quota", "NOT_FOUND", "404")
+
+
+def _eh_erro_recuperavel(erro: Exception) -> bool:
+    """Erros de cota esgotada ou modelo indisponível: vale tentar o próximo da cadeia."""
+    mensagem = str(erro)
+    return any(pista in mensagem for pista in PISTAS_ERRO_RECUPERAVEL)
+
 
 def _obter_executor():
-    global _llm_com_ferramentas, _ferramentas_por_nome
-    if _llm_com_ferramentas is None:
-        ferramentas = _construir_ferramentas()
-        _ferramentas_por_nome = {f.name: f for f in ferramentas}
-        llm = ChatGoogleGenerativeAI(model=MODELO_CHAT, temperature=0.2)
-        _llm_com_ferramentas = llm.bind_tools(ferramentas)
-    return _llm_com_ferramentas, _ferramentas_por_nome
+    """Garante que ferramentas e todos os modelos da cadeia de fallback estão prontos
+    (não faz chamada de API, só monta os objetos — usado para pré-carregar no Streamlit)."""
+    for nome_modelo in MODELOS_CHAT_FALLBACK:
+        _obter_llm_para_modelo(nome_modelo)
+
+
+def _obter_ferramentas():
+    global _ferramentas_lista, _ferramentas_por_nome
+    if _ferramentas_lista is None:
+        _ferramentas_lista = _construir_ferramentas()
+        _ferramentas_por_nome = {f.name: f for f in _ferramentas_lista}
+    return _ferramentas_lista, _ferramentas_por_nome
+
+
+def _obter_llm_para_modelo(nome_modelo: str):
+    if nome_modelo not in _llms_por_modelo:
+        ferramentas, _ = _obter_ferramentas()
+        llm = ChatGoogleGenerativeAI(model=nome_modelo, temperature=0.2)
+        _llms_por_modelo[nome_modelo] = llm.bind_tools(ferramentas)
+    return _llms_por_modelo[nome_modelo]
+
+
+def _invocar_com_fallback(mensagens):
+    ultimo_erro = None
+    for nome_modelo in MODELOS_CHAT_FALLBACK:
+        llm_com_ferramentas = _obter_llm_para_modelo(nome_modelo)
+        try:
+            return llm_com_ferramentas.invoke(mensagens)
+        except Exception as erro:
+            if not _eh_erro_recuperavel(erro):
+                raise
+            ultimo_erro = erro
+    raise ultimo_erro
 
 
 def _extrair_texto(conteudo) -> str:
@@ -179,12 +223,12 @@ def _extrair_texto(conteudo) -> str:
 
 
 def responder(pergunta: str) -> dict:
-    llm_com_ferramentas, ferramentas_por_nome = _obter_executor()
+    _, ferramentas_por_nome = _obter_ferramentas()
     mensagens = [SystemMessage(content=PROMPT_AGENTE), HumanMessage(content=pergunta)]
     fontes = []
 
     for _ in range(LIMITE_CHAMADAS_FERRAMENTA):
-        resposta = llm_com_ferramentas.invoke(mensagens)
+        resposta = _invocar_com_fallback(mensagens)
         mensagens.append(resposta)
 
         if not resposta.tool_calls:

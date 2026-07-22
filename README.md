@@ -97,6 +97,23 @@ mascarar o problema, o agente foi reescrito com um **loop de tool-calling manual
 erro e deixou o fluxo do agente mais explícito e fácil de acompanhar (veja `responder()` em
 `src/agente.py`).
 
+### Cadeia de fallback entre modelos (cota gratuita esgotada)
+
+Na prática, o nível gratuito do Gemini é bem restrito para modelos de chat (algumas contas têm
+limite de ~20 requisições/dia para um único modelo). Como cada modelo tem uma cota separada, o
+agente tenta uma **cadeia de modelos em ordem** e só passa para o próximo quando o erro é
+especificamente de cota esgotada ou modelo indisponível (nunca mascarando um bug real):
+
+```
+gemini-flash-latest → gemini-3.5-flash-lite → gemini-3.1-flash-lite → gemini-3.5-flash → gemma-4-26b-a4b-it
+```
+
+Os quatro primeiros são modelos Gemini "de verdade" (qualidade equivalente, testada com as mesmas
+perguntas deste README); o `gemma-4-26b-a4b-it` (família de modelo aberta, com tool-calling
+confirmado) fica por último, como rede de segurança — melhor uma resposta um pouco mais simples do
+que o app parar de funcionar. Se todos os modelos da cadeia esgotarem, a interface mostra uma
+mensagem clara pedindo para tentar novamente mais tarde, em vez de travar ou quebrar.
+
 ## Tecnologias e ferramentas
 
 - **Python 3.11+**
