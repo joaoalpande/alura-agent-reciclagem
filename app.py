@@ -45,17 +45,34 @@ if pergunta:
         st.markdown(pergunta)
 
     with st.chat_message("assistant"):
+        fontes = []
         with st.spinner("Consultando o documento..."):
-            resultado = responder(pergunta)
-        st.markdown(resultado["resposta"])
+            try:
+                resultado = responder(pergunta)
+                resposta_texto = resultado["resposta"]
+                fontes = resultado["fontes"]
+            except Exception as erro:
+                mensagem_erro = str(erro)
+                if any(
+                    pista in mensagem_erro
+                    for pista in ("429", "RESOURCE_EXHAUSTED", "quota", "Quota")
+                ):
+                    resposta_texto = (
+                        "⚠️ A cota gratuita diária do Gemini foi atingida. Tente novamente "
+                        "amanhã, quando a cota é renovada (o limite gratuito reseta a cada 24h)."
+                    )
+                else:
+                    resposta_texto = (
+                        "⚠️ Ocorreu um erro ao consultar o agente. Tente novamente em instantes."
+                    )
 
-        if resultado["fontes"]:
+        st.markdown(resposta_texto)
+
+        if fontes:
             with st.expander("Como o agente chegou nessa resposta"):
-                for i, fonte in enumerate(resultado["fontes"], start=1):
+                for i, fonte in enumerate(fontes, start=1):
                     st.markdown(f"**Passo {i} — ferramenta `{fonte['ferramenta']}`**")
                     st.markdown(f"Entrada: `{fonte['entrada']}`")
                     st.text(fonte["saida"])
 
-    st.session_state.historico.append(
-        {"papel": "assistant", "conteudo": resultado["resposta"]}
-    )
+    st.session_state.historico.append({"papel": "assistant", "conteudo": resposta_texto})
