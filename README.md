@@ -1,25 +1,38 @@
 # Alura Agent — Agente de IA para Documentos Internos
 
 Projeto do desafio final **Alura Agent** (Alura + Oracle). Um agente de inteligência artificial
-que responde perguntas sobre documentos internos da empresa (neste caso, um manual de reciclagem),
-eliminando a necessidade de buscar as informações manualmente no PDF.
+que responde perguntas sobre documentos internos da empresa — um manual de reciclagem (PDF) e um
+relatório mensal de reciclagem (CSV) — eliminando a necessidade de buscar as informações
+manualmente.
 
 ## Descrição geral
 
-O agente usa a técnica de **RAG (Retrieval-Augmented Generation)**: em vez de "decorar" o
-documento no modelo, ele indexa o conteúdo em um banco vetorial e, a cada pergunta, busca os
-trechos mais relevantes para montar o contexto que é enviado ao modelo de linguagem (Gemini).
-Isso permite respostas fundamentadas no texto real do documento, com baixa chance de alucinação.
+O agente combina duas técnicas, escolhendo a certa para cada tipo de pergunta:
+
+- **RAG (Retrieval-Augmented Generation)** para perguntas sobre políticas e procedimentos do
+  manual em PDF: o conteúdo é indexado em um banco vetorial e, a cada pergunta, os trechos mais
+  relevantes são recuperados para servir de contexto ao modelo.
+- **Consulta estruturada com pandas** para perguntas numéricas/percentuais sobre o relatório
+  mensal em CSV (médias, totais, valores por mês/material): os dados são consultados diretamente
+  com pandas, garantindo que os números sejam calculados corretamente, não "adivinhados" pelo
+  modelo.
+
+O agente é implementado como um **agente com tool-calling** (Gemini function calling): a cada
+pergunta, o próprio modelo decide qual ferramenta usar (busca no manual, consulta ao CSV, ou
+nenhuma, quando a informação não está disponível).
 
 ## Arquitetura da solução
 
-Duas fases:
-
-1. **Ingestão (offline)** — roda uma vez (ou sempre que os documentos mudarem):
+1. **Ingestão (offline)** — roda uma vez (ou sempre que o PDF mudar):
    PDF → divisão em *chunks* → embeddings (Gemini) → índice vetorial FAISS salvo em disco.
-2. **Consulta (online, na interface)** — a cada pergunta do usuário:
-   pergunta → busca os *chunks* mais similares no FAISS → monta prompt com o contexto encontrado
-   → Gemini gera a resposta em português → interface exibe resposta + trechos-fonte usados.
+2. **Consulta (online, na interface)** — a cada pergunta do usuário, o Gemini decide qual
+   ferramenta chamar:
+   - `buscar_no_manual`: busca os *chunks* mais similares no FAISS (manual em PDF).
+   - `consultar_dados_reciclagem`: calcula média/total/máximo/mínimo sobre o CSV com pandas,
+     usando apenas parâmetros escolhidos pelo modelo (mês, material, métrica, operação) — o
+     modelo **nunca executa código livre**, só valores de um conjunto fixo permitido.
+   O resultado da ferramenta volta para o modelo, que gera a resposta final em português. A
+   interface exibe a resposta e, num painel expansível, qual ferramenta foi usada e com que dados.
 
 ```
 documentos/*.pdf ──► PyPDFLoader ──► RecursiveCharacterTextSplitter ──► GoogleGenerativeAIEmbeddings
@@ -27,16 +40,35 @@ documentos/*.pdf ──► PyPDFLoader ──► RecursiveCharacterTextSplitter 
                                                                               ▼
                                                                         FAISS (vectorstore/)
                                                                               │
-   pergunta ──► retriever (top-k) ──► prompt + contexto ──► ChatGoogleGenerativeAI ──► resposta + fontes
+                                                              ┌───────────────┴───────────────┐
+                                                              │                                │
+pergunta ──► ChatGoogleGenerativeAI (decide a ferramenta) ──►│  buscar_no_manual (FAISS)      │
+                                                              │  consultar_dados_reciclagem     │
+                                                              │  (pandas sobre o CSV)           │
+                                                              └───────────────┬───────────────┘
+                                                                              ▼
+                                                              resposta final + fontes usadas
 ```
+
+### Por que não um "agente pandas" com execução livre de código?
+
+O LangChain oferece um padrão pronto (`create_pandas_dataframe_agent`) que deixa o modelo executar
+código Python livremente sobre o CSV. Como esta aplicação fica **pública na internet** após o
+deploy, isso abriria uma brecha real de execução remota de código (qualquer visitante poderia
+tentar manipular a pergunta para rodar código arbitrário no servidor). Por isso, a ferramenta
+`consultar_dados_reciclagem` foi implementada de forma restrita: o modelo só escolhe parâmetros
+(mês, material, métrica, operação) dentro de listas fixas, e uma função Python comum faz o cálculo
+com pandas — sem nenhum código gerado pelo modelo sendo executado.
 
 ## Tecnologias e ferramentas
 
 - **Python 3.11+**
-- **LangChain** (`langchain`, `langchain-community`, `langchain-google-genai`) — orquestração do RAG
-- **Google Gemini** — `gemini-flash-latest` (geração de respostas) e `models/gemini-embedding-001`
-  (embeddings)
+- **LangChain** (`langchain`, `langchain-community`, `langchain-text-splitters`,
+  `langchain-google-genai`) — orquestração do agente e das ferramentas
+- **Google Gemini** — `gemini-flash-latest` (geração de respostas e tool-calling) e
+  `models/gemini-embedding-001` (embeddings)
 - **pypdf** — leitura do PDF (via `PyPDFLoader`)
+- **pandas** — leitura e agregação do relatório mensal de reciclagem (CSV)
 - **FAISS** (`faiss-cpu`) — índice vetorial local, sem depender de banco de dados externo
 - **Streamlit** — interface web de chat
 - **python-dotenv** — carregamento da chave de API a partir de `.env`
@@ -47,10 +79,11 @@ documentos/*.pdf ──► PyPDFLoader ──► RecursiveCharacterTextSplitter 
 .
 ├── app.py                    # interface de chat (Streamlit)
 ├── src/
-│   ├── ingestao.py            # lê os PDFs e constrói o índice FAISS
-│   └── agente.py               # cadeia de RAG (retriever + prompt + Gemini)
+│   ├── ingestao.py                    # lê o PDF e constrói o índice FAISS
+│   └── agente.py                       # agente com tool-calling (busca no manual + pandas)
 ├── documentos/
-│   └── manual_reciclagem.pdf  # documento de exemplo usado como fonte
+│   ├── manual_reciclagem.pdf           # manual de reciclagem (fonte para o RAG)
+│   └── relatorio_reciclagem_mensal.csv # relatório mensal de % reciclado (fonte para o pandas)
 ├── vectorstore/               # índice FAISS gerado (não versionado)
 ├── requirements.txt
 ├── .env.example
@@ -77,33 +110,49 @@ documentos/*.pdf ──► PyPDFLoader ──► RecursiveCharacterTextSplitter 
    ```
    GOOGLE_API_KEY=sua_chave_aqui
    ```
-5. Gere o índice vetorial a partir dos documentos em `documentos/`:
+5. Gere o índice vetorial a partir do(s) PDF(s) em `documentos/`:
    ```bash
    python src/ingestao.py
    ```
+   *(o CSV de reciclagem é lido diretamente com pandas em tempo de consulta, não precisa de
+   ingestão/índice.)*
 6. Rode a aplicação:
    ```bash
    streamlit run app.py
    ```
 7. Acesse http://localhost:8501 no navegador.
 
-Para usar outro documento, basta colocar o PDF em `documentos/` e rodar novamente o passo 5.
+Para usar outro PDF, basta colocá-lo em `documentos/` e rodar novamente o passo 5. Para usar outro
+CSV, ajuste o nome do arquivo e as colunas esperadas em `src/agente.py`.
 
 ## Exemplos de perguntas e respostas
 
-**Pergunta:** Quais materiais podem ser reciclados segundo o manual?
-**Resposta:** Com base no manual, os materiais recicláveis listados e geridos pela empresa são:
-Papel e Papelão, Plástico, Metal, Vidro e Eletrônicos (e-lixo), incluindo cabos, baterias,
-periféricos e equipamentos.
-
 **Pergunta:** Qual a cor da lixeira para plástico?
 **Resposta:** A cor da lixeira para plástico é vermelha.
+*(ferramenta usada: `buscar_no_manual`)*
+
+**Pergunta:** Como devo descartar equipamentos eletrônicos?
+**Resposta:** De acordo com o manual de reciclagem, os equipamentos eletrônicos (como notebooks,
+monitores, celulares corporativos, cabos e baterias) devem ser descartados seguindo o
+procedimento: 1) entrega exclusiva ao setor de TI; 2) preenchimento do Formulário de Baixa de
+Ativo (FBA-07); 3) o setor de TI realiza a limpeza dos dados antes de enviar o material à empresa
+parceira especializada em descarte de e-lixo (GreenTech Reciclagem).
+*(ferramenta usada: `buscar_no_manual`)*
+
+**Pergunta:** Qual a média do percentual reciclado de papel nos últimos meses?
+**Resposta:** A média do percentual reciclado de papel nos últimos meses é de 72,07%.
+*(ferramenta usada: `consultar_dados_reciclagem`, calculado com pandas sobre o CSV)*
+
+**Pergunta:** Qual o percentual reciclado de metal em março de 2026?
+**Resposta:** O percentual reciclado de metal em março de 2026 foi de 76,10%.
+*(ferramenta usada: `consultar_dados_reciclagem`)*
 
 **Pergunta:** Qual a capital da França?
-**Resposta:** Não encontrei essa informação nos documentos disponíveis.
-
-*(O último exemplo mostra o agente recusando responder sobre algo fora do documento, em vez de
-inventar uma resposta.)*
+**Resposta:** Desculpe, não encontrei a informação nos documentos disponíveis. Minhas ferramentas
+são restritas a responder dúvidas sobre o manual de reciclagem e os relatórios de reciclagem da
+empresa.
+*(nenhuma ferramenta chamada — o agente reconhece que a pergunta está fora do escopo, em vez de
+inventar uma resposta)*
 
 ## Deploy na Oracle Cloud Infrastructure (OCI)
 
