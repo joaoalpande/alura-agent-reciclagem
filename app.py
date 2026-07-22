@@ -9,15 +9,18 @@ import streamlit as st
 from src.agente import responder
 
 st.set_page_config(page_title="Alura Agent", page_icon="♻️")
-st.title("♻️ Alura Agent — Manual de Reciclagem")
-st.caption("Pergunte algo sobre o manual de reciclagem indexado neste projeto.")
+st.title("♻️ Alura Agent — Manual e Relatório de Reciclagem")
+st.caption(
+    "Pergunte sobre o manual de reciclagem (PDF) ou sobre os percentuais do relatório "
+    "mensal de reciclagem (CSV)."
+)
 
 
 @st.cache_resource
 def preparar_agente():
-    # Força o carregamento do índice FAISS e do modelo uma única vez por sessão do servidor.
-    from src.agente import _obter_cadeia
-    _obter_cadeia()
+    # Força o carregamento do índice FAISS, do CSV e do modelo uma única vez por sessão do servidor.
+    from src.agente import _obter_executor
+    _obter_executor()
     return True
 
 
@@ -46,11 +49,12 @@ if pergunta:
             resultado = responder(pergunta)
         st.markdown(resultado["resposta"])
 
-        with st.expander("Trechos usados como fonte"):
-            for i, doc in enumerate(resultado["fontes"], start=1):
-                pagina = doc.metadata.get("page", "?")
-                st.markdown(f"**Fonte {i} — página {pagina}**")
-                st.text(doc.page_content)
+        if resultado["fontes"]:
+            with st.expander("Como o agente chegou nessa resposta"):
+                for i, fonte in enumerate(resultado["fontes"], start=1):
+                    st.markdown(f"**Passo {i} — ferramenta `{fonte['ferramenta']}`**")
+                    st.markdown(f"Entrada: `{fonte['entrada']}`")
+                    st.text(fonte["saida"])
 
     st.session_state.historico.append(
         {"papel": "assistant", "conteudo": resultado["resposta"]}
