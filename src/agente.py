@@ -17,8 +17,8 @@ load_dotenv()
 RAIZ = Path(__file__).resolve().parent.parent
 PASTA_VECTORSTORE = RAIZ / "vectorstore"
 
-MODELO_EMBEDDING = "models/text-embedding-004"
-MODELO_CHAT = "gemini-2.0-flash"
+MODELO_EMBEDDING = "models/gemini-embedding-001"
+MODELO_CHAT = "gemini-flash-latest"
 
 PROMPT_SISTEMA = (
     "Você é um assistente que responde perguntas sobre documentos internos da empresa. "

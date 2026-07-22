@@ -5,7 +5,11 @@ Uso:
     python src/ingestao.py
 """
 import os
+import sys
 from pathlib import Path
+
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8")
 
 from dotenv import load_dotenv
 from langchain_community.document_loaders import PyPDFLoader
@@ -19,7 +23,7 @@ RAIZ = Path(__file__).resolve().parent.parent
 PASTA_DOCUMENTOS = RAIZ / "documentos"
 PASTA_VECTORSTORE = RAIZ / "vectorstore"
 
-MODELO_EMBEDDING = "models/text-embedding-004"
+MODELO_EMBEDDING = "models/gemini-embedding-001"
 
 
 def carregar_documentos() -> list:
