@@ -1,0 +1,14 @@
+# Variáveis de ambiente
+.env
+
+# Índice vetorial gerado localmente (pode ser reconstruído com src/ingestao.py)
+vectorstore/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editor
+.vscode/
