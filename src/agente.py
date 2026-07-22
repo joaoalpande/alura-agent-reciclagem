@@ -80,6 +80,45 @@ class ConsultaReciclagem(BaseModel):
     )
 
 
+def calcular_dados_reciclagem(
+    df: pd.DataFrame,
+    mes: Optional[str] = None,
+    material: Optional[str] = None,
+    metrica: str = "percentual_reciclado",
+    operacao: str = "media",
+) -> str:
+    """Filtra o DataFrame de reciclagem por mês/material e agrega a métrica pedida.
+
+    Função pura (sem dependência de FAISS/Gemini) para poder ser testada isoladamente.
+    """
+    if metrica not in METRICAS_PERMITIDAS:
+        return f"Métrica inválida. Use uma de: {METRICAS_PERMITIDAS}"
+    if operacao not in OPERACOES_PERMITIDAS:
+        return f"Operação inválida. Use uma de: {OPERACOES_PERMITIDAS}"
+
+    df_filtrado = df
+    if mes:
+        df_filtrado = df_filtrado[df_filtrado["mes"] == mes]
+    if material:
+        df_filtrado = df_filtrado[df_filtrado["material"].str.lower() == material.lower()]
+
+    if df_filtrado.empty:
+        return "Nenhum dado encontrado para os filtros informados."
+
+    serie = df_filtrado[metrica]
+    valor = {
+        "media": serie.mean(),
+        "total": serie.sum(),
+        "maximo": serie.max(),
+        "minimo": serie.min(),
+    }[operacao]
+
+    return (
+        f"{operacao} de {metrica} (mês={mes or 'todos'}, material={material or 'todos'}) "
+        f"= {valor:.2f}"
+    )
+
+
 def _construir_ferramentas():
     retriever = _montar_retriever()
     df_reciclagem = _carregar_dataframe_reciclagem()
@@ -104,34 +143,7 @@ def _construir_ferramentas():
     ) -> str:
         """Calcula média, total, máximo ou mínimo de percentual reciclado ou quantidade (kg) a
         partir do relatório mensal de reciclagem (CSV), filtrando por mês e/ou material."""
-        if metrica not in METRICAS_PERMITIDAS:
-            return f"Métrica inválida. Use uma de: {METRICAS_PERMITIDAS}"
-        if operacao not in OPERACOES_PERMITIDAS:
-            return f"Operação inválida. Use uma de: {OPERACOES_PERMITIDAS}"
-
-        df_filtrado = df_reciclagem
-        if mes:
-            df_filtrado = df_filtrado[df_filtrado["mes"] == mes]
-        if material:
-            df_filtrado = df_filtrado[
-                df_filtrado["material"].str.lower() == material.lower()
-            ]
-
-        if df_filtrado.empty:
-            return "Nenhum dado encontrado para os filtros informados."
-
-        serie = df_filtrado[metrica]
-        valor = {
-            "media": serie.mean(),
-            "total": serie.sum(),
-            "maximo": serie.max(),
-            "minimo": serie.min(),
-        }[operacao]
-
-        return (
-            f"{operacao} de {metrica} (mês={mes or 'todos'}, material={material or 'todos'}) "
-            f"= {valor:.2f}"
-        )
+        return calcular_dados_reciclagem(df_reciclagem, mes, material, metrica, operacao)
 
     return [buscar_no_manual, consultar_dados_reciclagem]
 
