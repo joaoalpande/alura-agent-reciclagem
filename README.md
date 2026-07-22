@@ -60,6 +60,19 @@ tentar manipular a pergunta para rodar código arbitrário no servidor). Por iss
 (mês, material, métrica, operação) dentro de listas fixas, e uma função Python comum faz o cálculo
 com pandas — sem nenhum código gerado pelo modelo sendo executado.
 
+### Por que um loop de tool-calling manual em vez do `AgentExecutor` do LangChain?
+
+A primeira versão usava `create_tool_calling_agent` + `AgentExecutor`, a forma "oficial" do
+LangChain para agentes com ferramentas. Na prática, essa combinação com os modelos Gemini mais
+recentes (via `langchain-google-genai`) falhava com o erro `Function call is missing a
+thought_signature in functionCall parts` — um requisito novo da API do Gemini para chamadas de
+função que o `AgentExecutor` ainda não propaga corretamente entre turnos (ele reconstrói o
+histórico de mensagens ao chamar `.stream()` internamente e perde essa informação). Em vez de
+mascarar o problema, o agente foi reescrito com um **loop de tool-calling manual** (`llm.bind_tools`
++ um laço que executa as ferramentas chamadas e devolve o resultado ao modelo), o que resolveu o
+erro e deixou o fluxo do agente mais explícito e fácil de acompanhar (veja `responder()` em
+`src/agente.py`).
+
 ## Tecnologias e ferramentas
 
 - **Python 3.11+**
