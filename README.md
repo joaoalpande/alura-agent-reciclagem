@@ -1,9 +1,30 @@
-# Alura Agent — Agente de IA para Documentos Internos
+<p align="center">
+  <img src="assets/banner-challenge.png" alt="Banner do desafio Alura + Oracle" width="480">
+</p>
+
+# ♻️ Alura Agent — Agente de IA para Documentos Internos
+
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Streamlit](https://img.shields.io/badge/streamlit-app-ff4b4b)
+![Tests](https://img.shields.io/badge/tests-pytest-0A9EDC)
 
 Projeto do desafio final **Alura Agent** (Alura + Oracle). Um agente de inteligência artificial
-que responde perguntas sobre documentos internos da empresa — um manual de reciclagem (PDF) e um
-relatório mensal de reciclagem (CSV) — eliminando a necessidade de buscar as informações
-manualmente.
+que responde perguntas sobre documentos internos da **Alpande Tech** — o manual de política de
+gestão de materiais recicláveis (PDF) e o relatório mensal de reciclagem (CSV) — eliminando a
+necessidade de buscar as informações manualmente.
+
+## Sumário
+
+- [Descrição geral](#descrição-geral)
+- [Arquitetura da solução](#arquitetura-da-solução)
+- [Tecnologias e ferramentas](#tecnologias-e-ferramentas)
+- [Estrutura do projeto](#estrutura-do-projeto)
+- [Como executar localmente](#como-executar-localmente)
+- [Testes](#testes)
+- [Exemplos de perguntas e respostas](#exemplos-de-perguntas-e-respostas)
+- [Deploy na Oracle Cloud Infrastructure (OCI)](#deploy-na-oracle-cloud-infrastructure-oci)
+- [Licença](#licença)
 
 ## Descrição geral
 
@@ -34,20 +55,23 @@ nenhuma, quando a informação não está disponível).
    O resultado da ferramenta volta para o modelo, que gera a resposta final em português. A
    interface exibe a resposta e, num painel expansível, qual ferramenta foi usada e com que dados.
 
+```mermaid
+flowchart LR
+    A["documentos/*.pdf"] --> B[PyPDFLoader]
+    B --> C[RecursiveCharacterTextSplitter]
+    C --> D[GoogleGenerativeAIEmbeddings]
+    D --> E[("FAISS\nvectorstore/")]
 ```
-documentos/*.pdf ──► PyPDFLoader ──► RecursiveCharacterTextSplitter ──► GoogleGenerativeAIEmbeddings
-                                                                              │
-                                                                              ▼
-                                                                        FAISS (vectorstore/)
-                                                                              │
-                                                              ┌───────────────┴───────────────┐
-                                                              │                                │
-pergunta ──► ChatGoogleGenerativeAI (decide a ferramenta) ──►│  buscar_no_manual (FAISS)      │
-                                                              │  consultar_dados_reciclagem     │
-                                                              │  (pandas sobre o CSV)           │
-                                                              └───────────────┬───────────────┘
-                                                                              ▼
-                                                              resposta final + fontes usadas
+
+```mermaid
+flowchart TD
+    Q[Pergunta do usuário] --> M["ChatGoogleGenerativeAI\n(decide a ferramenta)"]
+    M -- "política / procedimento" --> T1["buscar_no_manual\n(busca no FAISS)"]
+    M -- "número / percentual" --> T2["consultar_dados_reciclagem\n(pandas sobre o CSV)"]
+    M -- "fora do escopo" --> N[Nenhuma ferramenta]
+    T1 --> R[Resposta final + fontes usadas]
+    T2 --> R
+    N --> R2["Resposta: não encontrado nos documentos"]
 ```
 
 ### Por que não um "agente pandas" com execução livre de código?
@@ -94,12 +118,18 @@ erro e deixou o fluxo do agente mais explícito e fácil de acompanhar (veja `re
 ├── src/
 │   ├── ingestao.py                    # lê o PDF e constrói o índice FAISS
 │   └── agente.py                       # agente com tool-calling (busca no manual + pandas)
+├── tests/
+│   └── test_agente.py                  # testes unitários da lógica de cálculo (pandas)
 ├── documentos/
 │   ├── manual_reciclagem.pdf           # manual de reciclagem (fonte para o RAG)
 │   └── relatorio_reciclagem_mensal.csv # relatório mensal de % reciclado (fonte para o pandas)
+├── assets/
+│   └── banner-challenge.png            # banner do desafio (Alura + Oracle)
 ├── vectorstore/               # índice FAISS gerado (não versionado)
 ├── requirements.txt
+├── requirements-dev.txt       # dependências extras para rodar os testes
 ├── .env.example
+├── LICENSE
 └── .gitignore
 ```
 
@@ -137,6 +167,17 @@ erro e deixou o fluxo do agente mais explícito e fácil de acompanhar (veja `re
 
 Para usar outro PDF, basta colocá-lo em `documentos/` e rodar novamente o passo 5. Para usar outro
 CSV, ajuste o nome do arquivo e as colunas esperadas em `src/agente.py`.
+
+## Testes
+
+A lógica de cálculo sobre o CSV (`calcular_dados_reciclagem`, em `src/agente.py`) tem testes
+unitários que **não** chamam a API do Gemini nem precisam do índice FAISS — rodam em segundos e
+sem chave de API configurada:
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
 
 ## Exemplos de perguntas e respostas
 
@@ -194,3 +235,7 @@ Opcionalmente, configure um serviço `systemd` para manter a aplicação no ar a
 
 **Evidência do deploy:** _(adicionar aqui o link público da aplicação e/ou uma captura de tela da
 aplicação em execução na OCI)_.
+
+## Licença
+
+Distribuído sob a licença MIT — veja [LICENSE](LICENSE) para mais detalhes.
