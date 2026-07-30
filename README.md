@@ -18,6 +18,7 @@ necessidade de buscar as informações manualmente.
 
 - [Descrição geral](#descrição-geral)
 - [Arquitetura da solução](#arquitetura-da-solução)
+- [Gestão de documentos pela interface](#gestão-de-documentos-pela-interface)
 - [Tecnologias e ferramentas](#tecnologias-e-ferramentas)
 - [Estrutura do projeto](#estrutura-do-projeto)
 - [Como executar localmente](#como-executar-localmente)
@@ -114,6 +115,45 @@ confirmado) fica por último, como rede de segurança — melhor uma resposta um
 que o app parar de funcionar. Se todos os modelos da cadeia esgotarem, a interface mostra uma
 mensagem clara pedindo para tentar novamente mais tarde, em vez de travar ou quebrar.
 
+### Resiliência da cota de embeddings
+
+A cota gratuita do modelo de embeddings (`gemini-embedding-001`) tem um limite **por minuto**,
+separado da cota de chat. Como cada pergunta faz uma chamada de embedding (para buscar o trecho
+relevante) e reconstruir o índice pode gerar várias chamadas de uma vez, é comum esbarrar nesse
+limite em uma sessão de testes mais intensa. Em vez de propagar o erro `429 RESOURCE_EXHAUSTED` na
+primeira falha, `GoogleGenerativeAIEmbeddingsComRetry` (`src/embeddings.py`) lê o tempo de espera
+sugerido pela própria API (`retryDelay`) e tenta de novo automaticamente, tanto na busca quanto na
+reconstrução do índice.
+
+Além disso, como `vectorstore/` é gerado (não é versionado no Git — veja `.gitignore`), a aplicação
+constrói o índice sozinha na primeira execução caso ele não exista, a partir dos PDFs já presentes
+em `documentos/`. Isso evita que um clone novo do repositório (por exemplo, o primeiro deploy na
+OCI) exija rodar `python src/ingestao.py` manualmente antes do primeiro `streamlit run`.
+
+## Gestão de documentos pela interface
+
+Além do manual padrão, a barra lateral permite adicionar, listar e remover PDFs sem precisar rodar
+nenhum comando — o próprio Streamlit cuida da reindexação:
+
+- **Upload** — arraste um ou mais PDFs; cada um passa por três validações antes de ser salvo:
+  - **Duplicado** — se já existe um arquivo com esse nome em `documentos/`, o upload é ignorado
+    (evita reprocessar/sobrescrever à toa).
+  - **Assunto** — uma chamada rápida ao Gemini verifica se o conteúdo é sobre reciclagem, gestão de
+    resíduos ou sustentabilidade; documentos fora desse escopo são recusados antes de indexar.
+  - **Texto corrompido** — alguns PDFs (comum em documentos de sites de legislação mais antigos)
+    embutem uma fonte com codificação customizada que o `pypdf` não consegue mapear de volta para
+    texto legível — o conteúdo extraído vem com caracteres deslocados/ilegíveis. Como indexar esse
+    texto geraria embeddings inúteis (nunca encontrados em nenhuma busca), esses arquivos são
+    detectados e recusados também, em vez de aceitos silenciosamente.
+- **Documentos atuais** — lista os PDFs indexáveis com um botão 🗑️ para remover cada um.
+- **Reconstruir índice FAISS** — reconstrói o índice a partir do que estiver em `documentos/` no
+  momento. Um indicador (✅/⚠️) mostra se o índice está em dia com os documentos atuais; excluir
+  **todos** os PDFs e reconstruir remove o índice por completo (a busca em documentos fica
+  indisponível até um novo upload).
+- O relatório de reciclagem (`relatorio_reciclagem_mensal.csv`) **não** é gerenciável por upload
+  aqui — a ferramenta de cálculo espera colunas fixas (mês, material, % reciclado, kg), então trocar
+  o CSV livremente quebraria essa ferramenta.
+
 ## Tecnologias e ferramentas
 
 - **Python 3.11+**
@@ -133,8 +173,9 @@ mensagem clara pedindo para tentar novamente mais tarde, em vez de travar ou que
 .
 ├── app.py                    # interface de chat (Streamlit)
 ├── src/
-│   ├── ingestao.py                    # lê o PDF e constrói o índice FAISS
-│   └── agente.py                       # agente com tool-calling (busca no manual + pandas)
+│   ├── ingestao.py                    # lê os PDFs e constrói o índice FAISS
+│   ├── agente.py                       # agente com tool-calling (busca no manual + pandas)
+│   └── embeddings.py                   # embeddings com retry automático (cota por minuto)
 ├── tests/
 │   └── test_agente.py                  # testes unitários da lógica de cálculo (pandas)
 ├── documentos/
@@ -170,20 +211,23 @@ mensagem clara pedindo para tentar novamente mais tarde, em vez de travar ou que
    ```
    GOOGLE_API_KEY=sua_chave_aqui
    ```
-5. Gere o índice vetorial a partir do(s) PDF(s) em `documentos/`:
+5. (Opcional) Gere o índice vetorial manualmente a partir do(s) PDF(s) em `documentos/`:
    ```bash
    python src/ingestao.py
    ```
    *(o CSV de reciclagem é lido diretamente com pandas em tempo de consulta, não precisa de
-   ingestão/índice.)*
+   ingestão/índice. Esse passo também é opcional para os PDFs: se o índice não existir, a
+   aplicação o constrói sozinha na primeira execução do passo 6.)*
 6. Rode a aplicação:
    ```bash
    streamlit run app.py
    ```
 7. Acesse http://localhost:8501 no navegador.
 
-Para usar outro PDF, basta colocá-lo em `documentos/` e rodar novamente o passo 5. Para usar outro
-CSV, ajuste o nome do arquivo e as colunas esperadas em `src/agente.py`.
+Para adicionar, listar ou remover PDFs depois, use a seção "Gestão de documentos" na barra lateral
+da própria aplicação (veja [Gestão de documentos pela interface](#gestão-de-documentos-pela-interface))
+— não precisa rodar comandos manualmente. Para usar outro CSV, ajuste o nome do arquivo e as
+colunas esperadas em `src/agente.py`.
 
 ## Testes
 
