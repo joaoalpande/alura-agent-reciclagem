@@ -16,8 +16,10 @@ from dotenv import load_dotenv
 from langchain_community.vectorstores import FAISS
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI
 from pydantic import BaseModel, Field
+
+from src.embeddings import GoogleGenerativeAIEmbeddingsComRetry
 
 load_dotenv()
 
@@ -43,15 +45,17 @@ OPERACOES_PERMITIDAS = ("media", "total", "maximo", "minimo")
 PROMPT_AGENTE = (
     "Você é o Alura Agent, um assistente que responde perguntas sobre documentos internos da "
     "empresa. Você tem duas ferramentas:\n"
-    "- 'buscar_no_manual': retorna trechos do manual de reciclagem (PDF) relacionados à pergunta. "
-    "Use para políticas, procedimentos e regras.\n"
+    "- 'buscar_no_manual': retorna trechos relevantes de TODOS os documentos em PDF indexados — "
+    "o manual de reciclagem e quaisquer outros PDFs (leis, normas, outros manuais) que tenham "
+    "sido adicionados ao sistema. Use para políticas, procedimentos, legislação e regras.\n"
     "- 'consultar_dados_reciclagem': calcula média, total, máximo ou mínimo de percentual "
     "reciclado ou quantidade (kg), a partir do relatório mensal (CSV). Use para perguntas "
     "numéricas ou percentuais.\n"
     "Escolha a ferramenta certa para cada pergunta e baseie sua resposta apenas no que ela "
-    "retornar. Se nenhuma ferramenta trouxer a informação, diga claramente que não encontrou a "
-    "informação nos documentos disponíveis. Responda sempre em português, de forma clara e "
-    "objetiva."
+    "retornar. Nunca presuma que um PDF está fora do escopo antes de chamar a ferramenta — ela "
+    "busca em todos os documentos indexados, não só num arquivo fixo. Se nenhuma ferramenta "
+    "trouxer a informação, diga claramente que não encontrou a informação nos documentos "
+    "disponíveis. Responda sempre em português, de forma clara e objetiva."
 )
 
 
@@ -59,7 +63,7 @@ def _montar_retriever():
     if not PASTA_VECTORSTORE.exists():
         raise RuntimeError("Índice não encontrado. Rode antes: python src/ingestao.py")
 
-    embeddings = GoogleGenerativeAIEmbeddings(model=MODELO_EMBEDDING)
+    embeddings = GoogleGenerativeAIEmbeddingsComRetry(model=MODELO_EMBEDDING)
     vectorstore = FAISS.load_local(
         str(PASTA_VECTORSTORE), embeddings, allow_dangerous_deserialization=True
     )
@@ -134,10 +138,11 @@ def _construir_ferramentas():
 
     @tool
     def buscar_no_manual(pergunta: str) -> str:
-        """Busca trechos do manual de reciclagem (PDF) relevantes para a pergunta."""
+        """Busca trechos relevantes em todos os PDFs indexados (manual de reciclagem e
+        quaisquer outros documentos adicionados ao sistema)."""
         documentos = retriever.invoke(pergunta)
         if not documentos:
-            return "Nenhum trecho relevante encontrado no manual."
+            return "Nenhum trecho relevante encontrado nos documentos indexados."
         return "\n\n".join(
             f"[página {doc.metadata.get('page', '?')}] {doc.page_content}"
             for doc in documentos
@@ -179,6 +184,39 @@ def _obter_executor():
         _obter_llm_para_modelo(nome_modelo)
 
 
+def eh_documento_sobre_reciclagem(amostra_texto: str) -> bool:
+    """Pergunta ao Gemini se o texto (amostra das primeiras páginas do PDF) é sobre
+    reciclagem/gestão de resíduos/sustentabilidade — usado para recusar uploads fora do
+    escopo do agente antes de indexá-los. Em caso de falha na chamada (ex.: cota
+    esgotada), permite o upload (falha aberta) para não travar o usuário por instabilidade
+    da API."""
+    if not amostra_texto.strip():
+        return False
+    try:
+        llm = ChatGoogleGenerativeAI(
+            model=MODELOS_CHAT_FALLBACK[0], temperature=0, max_retries=1
+        )
+        pergunta = (
+            "Responda apenas 'sim' ou 'não', sem mais nada. O texto abaixo, extraído de um "
+            "PDF, é sobre reciclagem, gestão de resíduos ou sustentabilidade ambiental?\n\n"
+            f"{amostra_texto[:3000]}"
+        )
+        resposta = llm.invoke(pergunta)
+        return _extrair_texto(resposta.content).strip().lower().startswith("s")
+    except Exception:
+        return True
+
+
+def resetar_cache():
+    """Descarta ferramentas e modelos já montados, forçando recarregar o índice FAISS e o
+    CSV do zero na próxima pergunta. Usado depois que o índice é reconstruído (upload de
+    novos documentos) para o agente parar de usar o retriever antigo em memória."""
+    global _llms_por_modelo, _ferramentas_lista, _ferramentas_por_nome
+    _llms_por_modelo = {}
+    _ferramentas_lista = None
+    _ferramentas_por_nome = None
+
+
 def _obter_ferramentas():
     global _ferramentas_lista, _ferramentas_por_nome
     if _ferramentas_lista is None:
@@ -198,11 +236,13 @@ def _obter_llm_para_modelo(nome_modelo: str):
 
 
 def _invocar_com_fallback(mensagens):
+    """Retorna (resposta, nome_modelo) — o nome do modelo é usado pela UI para mostrar
+    qual modelo da cadeia de fallback respondeu."""
     ultimo_erro = None
     for nome_modelo in MODELOS_CHAT_FALLBACK:
         llm_com_ferramentas = _obter_llm_para_modelo(nome_modelo)
         try:
-            return llm_com_ferramentas.invoke(mensagens)
+            return llm_com_ferramentas.invoke(mensagens), nome_modelo
         except Exception as erro:
             if not _eh_erro_recuperavel(erro):
                 raise
@@ -228,13 +268,18 @@ def responder(pergunta: str) -> dict:
     _, ferramentas_por_nome = _obter_ferramentas()
     mensagens = [SystemMessage(content=PROMPT_AGENTE), HumanMessage(content=pergunta)]
     fontes = []
+    modelo_usado = None
 
     for _ in range(LIMITE_CHAMADAS_FERRAMENTA):
-        resposta = _invocar_com_fallback(mensagens)
+        resposta, modelo_usado = _invocar_com_fallback(mensagens)
         mensagens.append(resposta)
 
         if not resposta.tool_calls:
-            return {"resposta": _extrair_texto(resposta.content), "fontes": fontes}
+            return {
+                "resposta": _extrair_texto(resposta.content),
+                "fontes": fontes,
+                "modelo": modelo_usado,
+            }
 
         for chamada in resposta.tool_calls:
             ferramenta = ferramentas_por_nome[chamada["name"]]
@@ -253,4 +298,5 @@ def responder(pergunta: str) -> dict:
     return {
         "resposta": "Não consegui concluir a resposta após várias tentativas.",
         "fontes": fontes,
+        "modelo": modelo_usado,
     }
