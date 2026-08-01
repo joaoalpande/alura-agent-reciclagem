@@ -43,6 +43,10 @@ O agente é implementado como um **agente com tool-calling** (Gemini function ca
 pergunta, o próprio modelo decide qual ferramenta usar (busca no manual, consulta ao CSV, ou
 nenhuma, quando a informação não está disponível).
 
+A interface traz um botão para o repositório no GitHub e, na primeira visita, uma lista de
+**perguntas sugeridas clicáveis** (agrupadas por fonte — manual em PDF ou relatório em CSV) que já
+envia a pergunta ao ser clicada, para facilitar o primeiro contato com o agente.
+
 ## Arquitetura da solução
 
 1. **Ingestão (offline)** — roda uma vez (ou sempre que o PDF mudar):
@@ -135,21 +139,25 @@ OCI) exija rodar `python src/ingestao.py` manualmente antes do primeiro `streaml
 Além do manual padrão, a barra lateral permite adicionar, listar e remover PDFs sem precisar rodar
 nenhum comando — o próprio Streamlit cuida da reindexação:
 
-- **Upload** — arraste um ou mais PDFs; cada um passa por três validações antes de ser salvo:
+- **Upload** — arraste um ou mais PDFs; cada um passa por quatro validações antes de ser salvo:
   - **Duplicado** — se já existe um arquivo com esse nome em `documentos/`, o upload é ignorado
     (evita reprocessar/sobrescrever à toa).
-  - **Assunto** — uma chamada rápida ao Gemini verifica se o conteúdo é sobre reciclagem, gestão de
-    resíduos ou sustentabilidade; documentos fora desse escopo são recusados antes de indexar.
+  - **Arquivo inválido** — se o PDF estiver corrompido ao ponto de nem o `pypdf` conseguir abrir a
+    estrutura do arquivo, o upload é recusado com uma mensagem clara em vez de derrubar a página.
   - **Texto corrompido** — alguns PDFs (comum em documentos de sites de legislação mais antigos)
     embutem uma fonte com codificação customizada que o `pypdf` não consegue mapear de volta para
     texto legível — o conteúdo extraído vem com caracteres deslocados/ilegíveis. Como indexar esse
     texto geraria embeddings inúteis (nunca encontrados em nenhuma busca), esses arquivos são
     detectados e recusados também, em vez de aceitos silenciosamente.
-- **Documentos atuais** — lista os PDFs indexáveis com um botão 🗑️ para remover cada um.
+  - **Assunto** — uma chamada rápida ao Gemini verifica se o conteúdo é sobre reciclagem, gestão de
+    resíduos ou sustentabilidade; documentos fora desse escopo são recusados antes de indexar.
+- **Documentos atuais** — lista os PDFs indexáveis com um botão 🗑️ para remover cada um. O manual
+  padrão (`manual_reciclagem.pdf`) aparece com 🔒 em vez do botão de remover — é o documento base do
+  desafio, protegido contra exclusão acidental pela interface.
 - **Reconstruir índice FAISS** — reconstrói o índice a partir do que estiver em `documentos/` no
   momento. Um indicador (✅/⚠️) mostra se o índice está em dia com os documentos atuais; excluir
-  **todos** os PDFs e reconstruir remove o índice por completo (a busca em documentos fica
-  indisponível até um novo upload).
+  **todos** os PDFs (exceto o manual protegido) e reconstruir remove o índice por completo (a busca
+  em documentos fica indisponível até um novo upload).
 - O relatório de reciclagem (`relatorio_reciclagem_mensal.csv`) **não** é gerenciável por upload
   aqui — a ferramenta de cálculo espera colunas fixas (mês, material, % reciclado, kg), então trocar
   o CSV livremente quebraria essa ferramenta.
@@ -294,8 +302,21 @@ Passo a passo para publicar a aplicação em uma VM **OCI Compute** (elegível a
 
 Opcionalmente, configure um serviço `systemd` para manter a aplicação no ar após reinicializações.
 
-**Evidência do deploy:** _(adicionar aqui o link público da aplicação e/ou uma captura de tela da
-aplicação em execução na OCI)_.
+### Evidência do deploy
+
+**Link público:** http://163.176.181.35:8501
+
+A aplicação está em produção na **Oracle Cloud Infrastructure (OCI)**, em uma VM **Oracle Linux 9**
+(shape `VM.Standard.E2.1.Micro`, Always Free). A imagem abaixo mostra a aplicação respondendo
+corretamente uma pergunta sobre o manual de reciclagem, recuperando e citando as fontes:
+
+![Streamlit Agent rodando na OCI](deployment-evidence/streamlit-oci-deployed.png)
+
+Você pode acessar o link acima para testar a aplicação ao vivo. Exemplos de perguntas para
+experimentar:
+- "Quais materiais podem ser reciclados segundo o manual?"
+- "Como devo separar o lixo orgânico?"
+- "Qual a média do percentual reciclado de papel nos últimos meses?"
 
 ## Licença
 

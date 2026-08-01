@@ -9,11 +9,13 @@ from pathlib import Path
 import streamlit as st
 
 from src.agente import responder
+from src.embeddings import eh_erro_de_cota
 
 RAIZ = Path(__file__).resolve().parent
 PASTA_DOCUMENTOS = RAIZ / "documentos"
+DOCUMENTO_BASE = "manual_reciclagem.pdf"
 
-st.set_page_config(page_title="Alura Agent", page_icon="♻️")
+st.set_page_config(page_title="Alura Agent", page_icon="♻️", layout="wide")
 
 # O texto do file_uploader ("Drag and drop...", "Browse files") vem embutido no bundle
 # JS do Streamlit e não tem parâmetro de idioma — só dá pra traduzir sobrescrevendo via
@@ -55,8 +57,14 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.image(str(RAIZ / "assets" / "banner-challenge.png"))
-st.title("♻️ Alura Agent — Documentos Internos da Alpande Tech")
+st.image(str(RAIZ / "assets" / "banner-challenge.png"), width=500)
+
+col_titulo, col_github = st.columns([5, 1])
+col_titulo.title("♻️ Alura Agent — Documentos Internos da Alpande Tech")
+col_github.link_button(
+    "💻 GitHub", "https://github.com/joaoalpande/alura-agent-reciclagem"
+)
+
 st.caption(
     "Pergunte sobre os documentos internos da empresa: o manual de reciclagem (PDF, "
     "expansível por upload) e o relatório mensal de reciclagem (CSV)."
@@ -90,8 +98,32 @@ if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
 if "upload_mensagem" not in st.session_state:
     st.session_state.upload_mensagem = None
+if "historico" not in st.session_state:
+    st.session_state.historico = []
+
+PERGUNTAS_SUGERIDAS = {
+    "📄 Manual de reciclagem (PDF)": [
+        "Quais materiais podem ser reciclados segundo o manual?",
+        "Como devo separar o lixo orgânico?",
+    ],
+    "📊 Relatório mensal (CSV)": [
+        "Qual foi o percentual médio de reciclagem no último mês?",
+        "Qual material teve o maior total reciclado em kg?",
+    ],
+}
+
+pergunta = None
 
 with st.sidebar:
+    st.subheader("💡 Perguntas sugeridas")
+    st.caption("Clique em uma pergunta para enviar")
+    for categoria, perguntas in PERGUNTAS_SUGERIDAS.items():
+        st.markdown(f"**{categoria}**")
+        for texto in perguntas:
+            if st.button(texto, key=f"sugestao_{texto}", use_container_width=True):
+                pergunta = texto
+    st.divider()
+
     st.subheader("Gestão de documentos")
     arquivos = st.file_uploader(
         "Adicione PDFs ao manual de reciclagem",
@@ -107,22 +139,26 @@ with st.sidebar:
         salvos, recusados, duplicados, invalidos, corrompidos = [], [], [], [], []
         with st.spinner("Verificando se os arquivos são sobre reciclagem..."):
             for arquivo in arquivos:
-                if (PASTA_DOCUMENTOS / arquivo.name).exists():
-                    duplicados.append(arquivo.name)
+                # Path(nome).name descarta qualquer componente de diretório (ex.: "../../x.pdf"
+                # viraria só "x.pdf") — o app fica público na internet, então o nome enviado
+                # pelo navegador não pode ser confiado como um caminho seguro sem sanitizar.
+                nome_seguro = Path(arquivo.name).name
+                if (PASTA_DOCUMENTOS / nome_seguro).exists():
+                    duplicados.append(nome_seguro)
                     continue
                 conteudo = arquivo.getvalue()
                 try:
                     amostra = extrair_amostra_texto(conteudo)
                 except Exception:
-                    invalidos.append(arquivo.name)
+                    invalidos.append(nome_seguro)
                     continue
                 if texto_parece_corrompido(amostra):
-                    corrompidos.append(arquivo.name)
+                    corrompidos.append(nome_seguro)
                 elif eh_documento_sobre_reciclagem(amostra):
-                    (PASTA_DOCUMENTOS / arquivo.name).write_bytes(conteudo)
-                    salvos.append(arquivo.name)
+                    (PASTA_DOCUMENTOS / nome_seguro).write_bytes(conteudo)
+                    salvos.append(nome_seguro)
                 else:
-                    recusados.append(arquivo.name)
+                    recusados.append(nome_seguro)
 
         if salvos:
             st.session_state.indice_desatualizado = True
@@ -203,14 +239,18 @@ with st.sidebar:
 
     from src.ingestao import listar_pdfs
 
-    st.markdown("**Documentos atuais**")
     pdfs_atuais = listar_pdfs(PASTA_DOCUMENTOS)
+    st.metric("📄 PDFs disponíveis", len(pdfs_atuais))
+
+    st.markdown("**Documentos atuais**")
     if not pdfs_atuais:
         st.caption("Nenhum PDF em documentos/ no momento.")
     for pdf in pdfs_atuais:
         col_nome, col_excluir = st.columns([4, 1])
         col_nome.write(pdf.name)
-        if col_excluir.button("🗑️", key=f"excluir_{pdf.name}", help=f"Remover {pdf.name}"):
+        if pdf.name == DOCUMENTO_BASE:
+            col_excluir.markdown("🔒", help="Documento base do desafio — não pode ser removido pela interface.")
+        elif col_excluir.button("🗑️", key=f"excluir_{pdf.name}", help=f"Remover {pdf.name}"):
             pdf.unlink()
             st.session_state.indice_desatualizado = True
             st.rerun()
@@ -220,7 +260,7 @@ with st.sidebar:
     else:
         st.caption("✅ Índice em dia com os documentos atuais.")
 
-    if st.button("🔄 Reconstruir índice FAISS"):
+    if st.button("🔄 Reconstruir índice FAISS", type="primary", use_container_width=True):
         import shutil
 
         from src.agente import resetar_cache
@@ -249,20 +289,21 @@ with st.sidebar:
                     resetar_cache()
                     preparar_agente.clear()
                     st.session_state.indice_desatualizado = False
-                    st.success("Índice reconstruído com sucesso!")
+                    st.toast("Índice reconstruído com sucesso!", icon="✅")
             except Exception as erro:
-                mensagem_erro = str(erro)
-                if any(
-                    pista in mensagem_erro
-                    for pista in ("429", "RESOURCE_EXHAUSTED", "quota", "Quota")
-                ):
+                if eh_erro_de_cota(erro):
                     st.error(
                         "⚠️ A cota gratuita do modelo de embeddings foi atingida (limite por "
                         "minuto/dia do Gemini). Aguarde um pouco e clique em 'Reconstruir "
                         "índice FAISS' novamente."
                     )
                 else:
-                    st.error(f"Falha ao reconstruir o índice: {erro}")
+                    # Não expõe o texto cru da exceção na UI pública — só um aviso genérico
+                    # para o usuário; o detalhe fica no log do servidor para debugging.
+                    print(f"[reconstruir índice] erro inesperado: {erro!r}")
+                    st.error(
+                        "⚠️ Falha ao reconstruir o índice. Tente novamente em instantes."
+                    )
 
     st.divider()
     st.subheader("Dados numéricos (fixo)")
@@ -278,30 +319,22 @@ except RuntimeError as erro:
     st.error(str(erro))
     st.stop()
 
-if "historico" not in st.session_state:
-    st.session_state.historico = []
-
-if not st.session_state.historico:
-    with st.expander("💡 Exemplos de perguntas"):
-        st.markdown(
-            "- Quais materiais podem ser reciclados segundo o manual?\n"
-            "- Como devo separar o lixo orgânico?\n"
-            "- Qual foi o percentual médio de reciclagem no último mês? *(usa o CSV)*\n"
-            "- Qual material teve o maior total reciclado em kg? *(usa o CSV)*"
-        )
+AVATARES = {"user": "🧑", "assistant": "♻️"}
 
 for mensagem in st.session_state.historico:
-    with st.chat_message(mensagem["papel"]):
+    with st.chat_message(mensagem["papel"], avatar=AVATARES.get(mensagem["papel"])):
         st.markdown(mensagem["conteudo"])
 
-pergunta = st.chat_input("Digite sua pergunta sobre o documento...")
+pergunta_digitada = st.chat_input("Digite sua pergunta sobre o documento...")
+if pergunta_digitada:
+    pergunta = pergunta_digitada
 
 if pergunta:
     st.session_state.historico.append({"papel": "user", "conteudo": pergunta})
-    with st.chat_message("user"):
+    with st.chat_message("user", avatar=AVATARES["user"]):
         st.markdown(pergunta)
 
-    with st.chat_message("assistant"):
+    with st.chat_message("assistant", avatar=AVATARES["assistant"]):
         fontes = []
         modelo_usado = None
         with st.spinner("Consultando o documento..."):
@@ -312,10 +345,7 @@ if pergunta:
                 modelo_usado = resultado["modelo"]
             except Exception as erro:
                 mensagem_erro = str(erro)
-                if any(
-                    pista in mensagem_erro
-                    for pista in ("429", "RESOURCE_EXHAUSTED", "quota", "Quota")
-                ):
+                if eh_erro_de_cota(erro):
                     resposta_texto = (
                         "⚠️ A cota gratuita diária do Gemini foi atingida. Tente novamente "
                         "amanhã, quando a cota é renovada (o limite gratuito reseta a cada 24h)."
@@ -350,3 +380,9 @@ if pergunta:
                     st.text(fonte["saida"])
 
     st.session_state.historico.append({"papel": "assistant", "conteudo": resposta_texto})
+
+st.divider()
+st.caption(
+    "Alura Agent — projeto do desafio final Alura + Oracle · "
+    "[código no GitHub](https://github.com/joaoalpande/alura-agent-reciclagem)"
+)

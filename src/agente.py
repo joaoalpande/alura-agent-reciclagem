@@ -19,7 +19,7 @@ from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
 from pydantic import BaseModel, Field
 
-from src.embeddings import GoogleGenerativeAIEmbeddingsComRetry
+from src.embeddings import GoogleGenerativeAIEmbeddingsComRetry, eh_erro_de_cota
 
 load_dotenv()
 
@@ -116,7 +116,12 @@ def calcular_dados_reciclagem(
         df_filtrado = df_filtrado[df_filtrado["material"].str.lower() == material.lower()]
 
     if df_filtrado.empty:
-        return "Nenhum dado encontrado para os filtros informados."
+        meses_disponiveis = ", ".join(sorted(df["mes"].unique()))
+        return (
+            "Nenhum dado encontrado para os filtros informados. Meses disponíveis no "
+            f"relatório: {meses_disponiveis}. Se a pergunta for sobre 'o último mês', "
+            "use o mês mais recente desta lista."
+        )
 
     serie = df_filtrado[metrica]
     valor = {
@@ -168,13 +173,15 @@ _ferramentas_por_nome = None
 
 LIMITE_CHAMADAS_FERRAMENTA = 5
 
-PISTAS_ERRO_RECUPERAVEL = ("429", "RESOURCE_EXHAUSTED", "quota", "Quota", "NOT_FOUND", "404")
+PISTAS_ERRO_MODELO_INDISPONIVEL = ("NOT_FOUND", "404")
 
 
 def _eh_erro_recuperavel(erro: Exception) -> bool:
     """Erros de cota esgotada ou modelo indisponível: vale tentar o próximo da cadeia."""
     mensagem = str(erro)
-    return any(pista in mensagem for pista in PISTAS_ERRO_RECUPERAVEL)
+    return eh_erro_de_cota(erro) or any(
+        pista in mensagem for pista in PISTAS_ERRO_MODELO_INDISPONIVEL
+    )
 
 
 def _obter_executor():

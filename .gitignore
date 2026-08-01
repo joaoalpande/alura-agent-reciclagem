@@ -1,6 +1,10 @@
 # Variáveis de ambiente
 .env
 
+# Chaves SSH (deploy na OCI)
+*.key
+*.pem
+
 # Índice vetorial gerado localmente (pode ser reconstruído com src/ingestao.py)
 vectorstore/
 
