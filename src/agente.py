@@ -6,10 +6,11 @@ Combina duas ferramentas:
 - consultar_dados_reciclagem: calcula média/total/máximo/mínimo sobre o relatório mensal de
   reciclagem (CSV), usando pandas com parâmetros fixos (o modelo nunca executa código livre).
 
-Expõe responder(pergunta) -> {"resposta": str, "fontes": list[dict]}.
+Expõe responder(pergunta) -> {"resposta": str, "fontes": list[dict], "modelo": str}.
 """
+import logging
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -20,6 +21,8 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from pydantic import BaseModel, Field
 
 from src.embeddings import GoogleGenerativeAIEmbeddingsComRetry, eh_erro_de_cota
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -67,7 +70,9 @@ def _montar_retriever():
     vectorstore = FAISS.load_local(
         str(PASTA_VECTORSTORE), embeddings, allow_dangerous_deserialization=True
     )
-    return vectorstore.as_retriever(search_kwargs={"k": 4})
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
+    logger.info("Retriever montado com sucesso")
+    return retriever
 
 
 def _carregar_dataframe_reciclagem() -> pd.DataFrame:
@@ -201,7 +206,7 @@ def eh_documento_sobre_reciclagem(amostra_texto: str) -> bool:
         return False
     try:
         llm = ChatGoogleGenerativeAI(
-            model=MODELOS_CHAT_FALLBACK[0], temperature=0, max_retries=1
+            model=MODELOS_CHAT_FALLBACK[0], temperature=0, max_retries=1, timeout=15
         )
         pergunta = (
             "Responda apenas 'sim' ou 'não', sem mais nada. O texto abaixo, extraído de um "
@@ -210,7 +215,8 @@ def eh_documento_sobre_reciclagem(amostra_texto: str) -> bool:
         )
         resposta = llm.invoke(pergunta)
         return _extrair_texto(resposta.content).strip().lower().startswith("s")
-    except Exception:
+    except Exception as erro:
+        logger.warning(f"Erro ao classificar documento: {erro!r}, permitindo upload como fallback")
         return True
 
 
@@ -237,23 +243,39 @@ def _obter_llm_para_modelo(nome_modelo: str):
         ferramentas, _ = _obter_ferramentas()
         # max_retries=1: sem retry interno da biblioteca (5-6 tentativas com espera
         # crescente, ~60s) — a cadeia de fallback já cuida da resiliência entre modelos.
-        llm = ChatGoogleGenerativeAI(model=nome_modelo, temperature=0.2, max_retries=1)
+        # timeout=30: evita que requisições fiquem penduradas indefinidamente.
+        llm = ChatGoogleGenerativeAI(
+            model=nome_modelo, temperature=0.2, max_retries=1, timeout=30
+        )
         _llms_por_modelo[nome_modelo] = llm.bind_tools(ferramentas)
+        logger.debug(f"LLM para {nome_modelo} inicializado com timeout=30s")
     return _llms_por_modelo[nome_modelo]
 
 
-def _invocar_com_fallback(mensagens):
-    """Retorna (resposta, nome_modelo) — o nome do modelo é usado pela UI para mostrar
-    qual modelo da cadeia de fallback respondeu."""
+def _invocar_com_fallback(mensagens: list) -> tuple[Any, str]:
+    """Tenta invocar modelos da cadeia de fallback até conseguir uma resposta.
+
+    Retorna (resposta, nome_modelo) — o nome do modelo é usado pela UI para mostrar
+    qual modelo da cadeia de fallback respondeu.
+    """
     ultimo_erro = None
     for nome_modelo in MODELOS_CHAT_FALLBACK:
         llm_com_ferramentas = _obter_llm_para_modelo(nome_modelo)
         try:
-            return llm_com_ferramentas.invoke(mensagens), nome_modelo
+            logger.debug(f"Tentando invocar {nome_modelo}...")
+            resposta = llm_com_ferramentas.invoke(mensagens)
+            logger.info(f"Sucesso com {nome_modelo}")
+            return resposta, nome_modelo
         except Exception as erro:
             if not _eh_erro_recuperavel(erro):
+                logger.error(f"Erro não-recuperável com {nome_modelo}: {erro!r}")
                 raise
+            logger.warning(
+                f"Erro recuperável com {nome_modelo} ({type(erro).__name__}), "
+                f"tentando próximo da cadeia..."
+            )
             ultimo_erro = erro
+    logger.critical(f"Todos os modelos da cadeia falharam. Último erro: {ultimo_erro!r}")
     raise ultimo_erro
 
 
@@ -271,23 +293,41 @@ def _extrair_texto(conteudo) -> str:
     return str(conteudo)
 
 
-def responder(pergunta: str) -> dict:
+def responder(pergunta: str) -> dict[str, Any]:
+    """Responde uma pergunta consultando ferramentas (FAISS + CSV) via agente Gemini.
+
+    Retorna {"resposta": str, "fontes": list[dict], "modelo": str} com a resposta completa
+    e rastreabilidade sobre quais ferramentas foram usadas e qual modelo respondeu.
+    """
+    pergunta_limpa = pergunta.strip() if pergunta else ""
+    if not pergunta_limpa:
+        logger.warning("Pergunta vazia recebida")
+        return {
+            "resposta": "Por favor, digite uma pergunta.",
+            "fontes": [],
+            "modelo": None,
+        }
+
+    logger.info(f"Processando pergunta: {pergunta_limpa[:100]}...")
     _, ferramentas_por_nome = _obter_ferramentas()
-    mensagens = [SystemMessage(content=PROMPT_AGENTE), HumanMessage(content=pergunta)]
+    mensagens = [SystemMessage(content=PROMPT_AGENTE), HumanMessage(content=pergunta_limpa)]
     fontes = []
     modelo_usado = None
 
-    for _ in range(LIMITE_CHAMADAS_FERRAMENTA):
+    for tentativa in range(LIMITE_CHAMADAS_FERRAMENTA):
         resposta, modelo_usado = _invocar_com_fallback(mensagens)
         mensagens.append(resposta)
 
         if not resposta.tool_calls:
+            texto_resposta = _extrair_texto(resposta.content)
+            logger.info(f"Resposta concluída após {tentativa + 1} iteração(ões) com {modelo_usado}")
             return {
-                "resposta": _extrair_texto(resposta.content),
+                "resposta": texto_resposta,
                 "fontes": fontes,
                 "modelo": modelo_usado,
             }
 
+        logger.debug(f"Iteração {tentativa + 1}: {len(resposta.tool_calls)} chamada(s) de ferramenta")
         for chamada in resposta.tool_calls:
             ferramenta = ferramentas_por_nome[chamada["name"]]
             resultado = ferramenta.invoke(chamada["args"])
@@ -302,6 +342,7 @@ def responder(pergunta: str) -> dict:
                 ToolMessage(content=str(resultado), tool_call_id=chamada["id"])
             )
 
+    logger.warning(f"Atingido limite de {LIMITE_CHAMADAS_FERRAMENTA} chamadas de ferramenta")
     return {
         "resposta": "Não consegui concluir a resposta após várias tentativas.",
         "fontes": fontes,
