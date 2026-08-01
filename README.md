@@ -310,7 +310,7 @@ A aplicação está em produção na **Oracle Cloud Infrastructure (OCI)**, em u
 (shape `VM.Standard.E2.1.Micro`, Always Free). A imagem abaixo mostra a aplicação respondendo
 corretamente uma pergunta sobre o manual de reciclagem, recuperando e citando as fontes:
 
-![Streamlit Agent rodando na OCI](deployment-evidence/streamlit-oci-deployed.png)
+![Streamlit Agent rodando na OCI](deployment-evidence/streamlit-deployed-oci-2026-08-01.png)
 
 Você pode acessar o link acima para testar a aplicação ao vivo. Exemplos de perguntas para
 experimentar:
