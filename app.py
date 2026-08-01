@@ -4,12 +4,19 @@ Interface de chat (Streamlit) para o Alura Agent.
 Uso:
     streamlit run app.py
 """
+import logging
 from pathlib import Path
 
 import streamlit as st
 
 from src.agente import responder
 from src.embeddings import eh_erro_de_cota
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 RAIZ = Path(__file__).resolve().parent
 PASTA_DOCUMENTOS = RAIZ / "documentos"
@@ -137,30 +144,37 @@ with st.sidebar:
 
         PASTA_DOCUMENTOS.mkdir(exist_ok=True)
         salvos, recusados, duplicados, invalidos, corrompidos = [], [], [], [], []
-        with st.spinner("Verificando se os arquivos são sobre reciclagem..."):
+        logger.info(f"Processando {len(arquivos)} arquivo(s)...")
+        with st.spinner("🔍 Verificando se os arquivos são sobre reciclagem..."):
             for arquivo in arquivos:
                 # Path(nome).name descarta qualquer componente de diretório (ex.: "../../x.pdf"
                 # viraria só "x.pdf") — o app fica público na internet, então o nome enviado
                 # pelo navegador não pode ser confiado como um caminho seguro sem sanitizar.
                 nome_seguro = Path(arquivo.name).name
                 if (PASTA_DOCUMENTOS / nome_seguro).exists():
+                    logger.warning(f"Duplicado: {nome_seguro}")
                     duplicados.append(nome_seguro)
                     continue
                 conteudo = arquivo.getvalue()
                 try:
                     amostra = extrair_amostra_texto(conteudo)
-                except Exception:
+                except Exception as e:
+                    logger.error(f"Não foi possível ler {nome_seguro}: {e!r}")
                     invalidos.append(nome_seguro)
                     continue
                 if texto_parece_corrompido(amostra):
+                    logger.warning(f"Texto corrompido em {nome_seguro}")
                     corrompidos.append(nome_seguro)
                 elif eh_documento_sobre_reciclagem(amostra):
                     (PASTA_DOCUMENTOS / nome_seguro).write_bytes(conteudo)
+                    logger.info(f"Arquivo salvo: {nome_seguro}")
                     salvos.append(nome_seguro)
                 else:
+                    logger.info(f"Arquivo recusado (fora do escopo): {nome_seguro}")
                     recusados.append(nome_seguro)
 
         if salvos:
+            logger.info(f"{len(salvos)} arquivo(s) salvo(s), índice marcado como desatualizado")
             st.session_state.indice_desatualizado = True
         st.session_state.upload_mensagem = {
             "salvos": salvos, "recusados": recusados, "duplicados": duplicados,
@@ -266,43 +280,48 @@ with st.sidebar:
         from src.agente import resetar_cache
         from src.ingestao import carregar_documentos, construir_indice, dividir_em_chunks
 
-        with st.spinner("Reconstruindo índice a partir dos documentos..."):
+        with st.spinner("⏳ Reconstruindo índice a partir dos documentos..."):
             try:
+                logger.info("Iniciando reconstrução do índice FAISS")
                 documentos = carregar_documentos()
                 if not documentos:
-                    # Sem nenhum PDF na pasta, um índice antigo deixado no disco faria o
-                    # agente continuar respondendo com base em documentos já excluídos.
+                    logger.warning("Nenhum PDF encontrado — removendo índice antigo")
                     if (RAIZ / "vectorstore").exists():
                         shutil.rmtree(RAIZ / "vectorstore")
                     resetar_cache()
                     preparar_agente.clear()
                     st.session_state.indice_desatualizado = False
                     st.warning(
-                        f"Nenhum PDF encontrado em {PASTA_DOCUMENTOS} — índice removido. "
-                        "A busca em documentos ficará indisponível até adicionar um PDF e "
+                        f"❌ Nenhum PDF encontrado em `{PASTA_DOCUMENTOS}` — índice removido. "
+                        "A busca em documentos ficará indisponível até você adicionar um PDF e "
                         "reconstruir novamente."
                     )
                 else:
+                    logger.info(f"Processando {len(documentos)} documento(s)...")
                     chunks = dividir_em_chunks(documentos)
+                    logger.info(f"Criados {len(chunks)} chunks, construindo índice...")
                     indice = construir_indice(chunks)
                     indice.save_local(str(RAIZ / "vectorstore"))
                     resetar_cache()
                     preparar_agente.clear()
                     st.session_state.indice_desatualizado = False
-                    st.toast("Índice reconstruído com sucesso!", icon="✅")
+                    logger.info("Índice FAISS reconstruído com sucesso")
+                    st.toast("✅ Índice reconstruído com sucesso!", icon="✅")
             except Exception as erro:
+                logger.exception(f"Erro ao reconstruir índice: {erro!r}")
                 if eh_erro_de_cota(erro):
                     st.error(
-                        "⚠️ A cota gratuita do modelo de embeddings foi atingida (limite por "
-                        "minuto/dia do Gemini). Aguarde um pouco e clique em 'Reconstruir "
-                        "índice FAISS' novamente."
+                        "⚠️ **Cota de embeddings atingida**\n\n"
+                        "O limite de chamadas à API de embeddings foi atingido "
+                        "(limite por minuto/dia do Gemini). \n\n"
+                        "**Próximos passos:**\n"
+                        "1. Aguarde alguns minutos para a cota se renovar\n"
+                        "2. Clique em 'Reconstruir índice FAISS' novamente"
                     )
                 else:
-                    # Não expõe o texto cru da exceção na UI pública — só um aviso genérico
-                    # para o usuário; o detalhe fica no log do servidor para debugging.
-                    print(f"[reconstruir índice] erro inesperado: {erro!r}")
                     st.error(
-                        "⚠️ Falha ao reconstruir o índice. Tente novamente em instantes."
+                        "❌ **Falha ao reconstruir o índice**\n\n"
+                        "Algo inesperado aconteceu. Tente novamente em alguns instantes."
                     )
 
     st.divider()
@@ -337,28 +356,45 @@ if pergunta:
     with st.chat_message("assistant", avatar=AVATARES["assistant"]):
         fontes = []
         modelo_usado = None
-        with st.spinner("Consultando o documento..."):
+        with st.spinner("🔍 Consultando o documento..."):
             try:
+                logger.info(f"Respondendo pergunta: {pergunta[:50]}...")
                 resultado = responder(pergunta)
                 resposta_texto = resultado["resposta"]
                 fontes = resultado["fontes"]
                 modelo_usado = resultado["modelo"]
+                logger.info(f"Resposta gerada com sucesso usando {modelo_usado}")
             except Exception as erro:
+                logger.exception(f"Erro ao responder: {erro!r}")
                 mensagem_erro = str(erro)
                 if eh_erro_de_cota(erro):
                     resposta_texto = (
-                        "⚠️ A cota gratuita diária do Gemini foi atingida. Tente novamente "
-                        "amanhã, quando a cota é renovada (o limite gratuito reseta a cada 24h)."
+                        "⚠️ **Cota gratuita do Gemini atingida**\n\n"
+                        "A API gratuita do Google Gemini tem limites diários. "
+                        "Tente novamente amanhã, quando a cota é renovada automaticamente (24h).\n\n"
+                        "💡 **Dica:** Se for uso recorrente, considere usar uma chave paga."
                     )
                 elif "Índice não encontrado" in mensagem_erro:
                     resposta_texto = (
-                        "⚠️ Nenhum PDF está indexado no momento (todos foram removidos). "
-                        "Adicione um PDF na barra lateral e clique em 'Reconstruir índice "
-                        "FAISS' para eu voltar a responder sobre documentos."
+                        "⚠️ **Nenhum documento indexado**\n\n"
+                        "Para eu responder sobre documentos, é necessário:\n"
+                        "1. Adicionar um PDF na barra lateral (seção 'Gestão de documentos')\n"
+                        "2. Clicar em '🔄 Reconstruir índice FAISS'\n"
+                        "3. Aguardar a construção do índice\n\n"
+                        "Depois poderei responder suas perguntas sobre o conteúdo do documento."
+                    )
+                elif "timeout" in mensagem_erro.lower():
+                    resposta_texto = (
+                        "⏱️ **Timeout na requisição**\n\n"
+                        "A API do Gemini demorou muito para responder. "
+                        "Tente novamente em alguns instantes — a rede pode estar congestionada."
                     )
                 else:
                     resposta_texto = (
-                        "⚠️ Ocorreu um erro ao consultar o agente. Tente novamente em instantes."
+                        "❌ **Erro inesperado ao consultar o agente**\n\n"
+                        "Algo saiu errado que não era esperado. Tente novamente em instantes.\n\n"
+                        "Se o problema persistir, verifique se a chave `GOOGLE_API_KEY` está corretamente "
+                        "configurada no arquivo `.env`."
                     )
 
         st.markdown(resposta_texto)
