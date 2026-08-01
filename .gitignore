@@ -4,6 +4,7 @@
 # Chaves SSH (deploy na OCI)
 *.key
 *.pem
+*.pub
 
 # Índice vetorial gerado localmente (pode ser reconstruído com src/ingestao.py)
 vectorstore/
