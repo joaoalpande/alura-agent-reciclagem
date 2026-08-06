@@ -8,6 +8,7 @@ import logging
 from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from src.agente import responder
 from src.embeddings import eh_erro_de_cota
@@ -23,6 +24,30 @@ PASTA_DOCUMENTOS = RAIZ / "documentos"
 DOCUMENTO_BASE = "manual_reciclagem.pdf"
 
 st.set_page_config(page_title="Alura Agent", page_icon="♻️", layout="wide")
+
+# Pede ao navegador para não traduzir automaticamente esta página. Tradução automática
+# (ex.: Chrome Translate) reescreve nós de texto por fora do React; quando o Streamlit
+# tenta re-renderizar esses mesmos nós num rerun, o DOM já foi alterado por fora e o
+# React quebra com "NotFoundError: Failed to execute 'removeChild' on 'Node'" — um
+# problema conhecido e recorrente em apps React, não específico deste código. O script
+# roda num iframe (components.v1.html executa <script>, diferente de st.markdown), então
+# precisa alcançar window.parent.document para afetar o documento principal do Streamlit.
+components.html(
+    """
+    <script>
+    const doc = window.parent.document;
+    doc.documentElement.setAttribute("translate", "no");
+    doc.body.classList.add("notranslate");
+    if (!doc.querySelector('meta[name="google"]')) {
+        const meta = doc.createElement("meta");
+        meta.name = "google";
+        meta.content = "notranslate";
+        doc.head.appendChild(meta);
+    }
+    </script>
+    """,
+    height=0,
+)
 
 # O texto do file_uploader ("Drag and drop...", "Browse files") vem embutido no bundle
 # JS do Streamlit e não tem parâmetro de idioma — só dá pra traduzir sobrescrevendo via
